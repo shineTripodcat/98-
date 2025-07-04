@@ -293,6 +293,7 @@ class CrawlTask:
                     
                     # 检查是否启用自动115网盘转存
                     csv_file = result.get('csv_file') or result.get('result_file')
+                    logger.info(f"检查自动转存: csv_file={csv_file}, exists={os.path.exists(csv_file) if csv_file else False}")
                     if csv_file and os.path.exists(csv_file):
                         # 检查115网盘配置中的auto_transfer_enabled设置
                         pan115_config = pan115_manager.load_config()
@@ -334,6 +335,15 @@ class CrawlTask:
                                 'success': False,
                                 'message': '115网盘自动转存未启用'
                             }
+                    else:
+                        if not csv_file:
+                            logger.info("爬取结果中未包含CSV文件路径，跳过115网盘转存")
+                        else:
+                            logger.warning(f"CSV文件不存在: {csv_file}，跳过115网盘转存")
+                        self.result['pan115_transfer'] = {
+                            'success': False,
+                            'message': 'CSV文件不存在或路径为空'
+                        }
             
         except Exception as e:
             logger.error(f"爬虫任务执行失败: {str(e)}")

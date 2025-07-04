@@ -355,8 +355,8 @@ class WebCrawler:
             logger.error(f"加载TID文件失败: {str(e)}")
             return []
     
-    def _save_results_to_csv(self, results: List[Dict[str, Any]], filename: str) -> bool:
-        """保存结果到CSV文件"""
+    def _save_results_to_csv(self, results: List[Dict[str, Any]], filename: str) -> str:
+        """保存结果到CSV文件，返回完整文件路径"""
         try:
             filepath = os.path.join(self.data_dir, filename)
             
@@ -389,11 +389,11 @@ class WebCrawler:
                     writer.writerow(row)
             
             logger.info(f"结果已保存到CSV文件: {filepath}")
-            return True
+            return filepath  # 返回完整文件路径
         
         except Exception as e:
             logger.error(f"保存CSV文件失败: {str(e)}")
-            return False
+            return None
     
     def _compare_tids(self, tid1: str, tid2: str) -> int:
         """比较两个TID的大小"""
@@ -562,11 +562,10 @@ class WebCrawler:
                     self.config['max_tid'] = max_tid
             
             # 保存结果
-            result_file = self.config.get('result_csv', 'results.csv')
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            result_file = f"full_crawl_{timestamp}.csv"
+            filename = f"full_crawl_{timestamp}.csv"
             
-            self._save_results_to_csv(all_results, result_file)
+            result_file = self._save_results_to_csv(all_results, filename)
             
             if progress_callback:
                 progress_callback(100, "全量爬取完成")
@@ -690,12 +689,12 @@ class WebCrawler:
                 self.config['max_tid'] = max_tid
             
             # 保存结果
+            result_file = None
             if all_results:
-                result_file = self.config.get('result_csv', 'results.csv')
                 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                result_file = f"incremental_crawl_{timestamp}.csv"
+                filename = f"incremental_crawl_{timestamp}.csv"
                 
-                self._save_results_to_csv(all_results, result_file)
+                result_file = self._save_results_to_csv(all_results, filename)
             
             if progress_callback:
                 progress_callback(100, "增量爬取完成")
