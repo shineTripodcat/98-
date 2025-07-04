@@ -31,7 +31,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py .
 COPY crawler.py .
 COPY config_manager.py .
-COPY pan115_manager.py .
+
 COPY utils.py .
 COPY templates/ ./templates/
 COPY static/ ./static/

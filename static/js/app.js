@@ -107,6 +107,8 @@ class CrawlerApp {
                 break;
             case 'results':
                 this.loadResults();
+                // 加载CSV文件列表
+                loadCsvFileList();
                 break;
             case 'logs':
                 this.loadLogs();
@@ -725,6 +727,9 @@ class CrawlerApp {
                         <button class="btn btn-outline-success" onclick="app.downloadFile('${result.filename}')">
                             <i class="bi bi-download"></i> 下载
                         </button>
+                        <button class="btn btn-outline-warning" onclick="app.transferToPan115('${result.filename}')">
+                            <i class="bi bi-cloud-upload"></i> 转存115
+                        </button>
                     </div>
                 </td>
             `;
@@ -796,6 +801,69 @@ class CrawlerApp {
     downloadFile(filename) {
         window.open(`/api/results/download/${filename}`, '_blank');
     }
+
+    async transferToPan115(filename) {
+        if (!filename.endsWith('.csv')) {
+            this.showAlert('只能转存CSV文件到115网盘', 'warning');
+            return;
+        }
+
+        const confirmed = confirm(`确定要将文件 "${filename}" 转存到115网盘吗？\n\n这将提取CSV文件中的所有磁力链接，去重后分批推送到115网盘。`);
+        if (!confirmed) {
+            return;
+        }
+
+        try {
+            const response = await fetch('/api/pan115/manual-transfer', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ csv_filename: filename })
+            });
+
+            const result = await response.json();
+
+            if (result.success) {
+                this.showAlert(`转存任务已启动！处理了 ${result.total_count || 0} 条记录，成功转存 ${result.success_count || 0} 个文件`, 'success');
+            } else {
+                throw new Error(result.error || '转存失败');
+            }
+        } catch (error) {
+            console.error('转存到115网盘失败:', error);
+            this.showAlert('转存到115网盘失败: ' + error.message, 'danger');
+        }
+    }
+
+    async loadCsvFiles() {
+        try {
+            const response = await fetch('/api/results/csv-files');
+            const result = await response.json();
+            
+            const selector = document.getElementById('csv-file-selector');
+            selector.innerHTML = '';
+            
+            if (result.success && result.files.length > 0) {
+                result.files.forEach(file => {
+                    const option = document.createElement('option');
+                    option.value = file.filename;
+                    option.textContent = `${file.filename} (${this.formatFileSize(file.size)}) - ${new Date(file.modified).toLocaleString()}`;
+                    selector.appendChild(option);
+                });
+            } else {
+                const option = document.createElement('option');
+                option.value = '';
+                option.disabled = true;
+                option.textContent = '暂无CSV文件';
+                selector.appendChild(option);
+            }
+        } catch (error) {
+            console.error('加载CSV文件列表失败:', error);
+            this.showAlert('加载CSV文件列表失败: ' + error.message, 'danger');
+        }
+    }
+
+
 
     async loadLogs() {
         const lines = document.getElementById('log-lines').value;
@@ -1004,8 +1072,8 @@ class CrawlerApp {
                     this.populatePan115ConfigForm(result.config);
                     // 显示缓存的登录状态（如果有）
                     this.displayCachedLoginStatus();
-                    // 加载CSV文件列表
-                    await loadCsvFileList();
+                    // 显示缓存的文件夹列表（如果有）
+                    this.displayCachedFoldersList();
                 } else {
                     throw new Error(result.error || '获取115网盘配置失败');
                 }
@@ -1106,14 +1174,33 @@ class CrawlerApp {
                         <small class="d-block mt-1 text-muted">缓存状态，点击"检查登录"刷新</small>
                     </div>
                 `;
-                
-                // 如果登录成功，自动加载文件夹列表
-                if (statusData.logged_in) {
-                    this.loadPan115Folders();
-                }
             }
         } else {
             statusDiv.innerHTML = '<p class="text-muted">请先配置Cookie文件，然后点击"检查登录"</p>';
+        }
+    }
+    
+    displayCachedFoldersList() {
+        // 显示缓存的文件夹列表
+        const cachedFolders = localStorage.getItem('pan115_folders_cache');
+        const foldersDiv = document.getElementById('pan115-folders-list');
+        
+        if (cachedFolders) {
+            const cacheData = JSON.parse(cachedFolders);
+            const currentTime = Date.now();
+            
+            // 如果缓存时间在10分钟内，显示缓存数据
+            if (currentTime - cacheData.timestamp < 10 * 60 * 1000) {
+                this.displayFoldersList(cacheData.folders, false);
+            } else {
+                foldersDiv.innerHTML = `
+                    <div class="alert alert-warning mb-0">
+                        <i class="bi bi-clock"></i> 文件夹列表已过期，请点击"获取文件夹"刷新
+                    </div>
+                `;
+            }
+        } else {
+            foldersDiv.innerHTML = '<p class="text-muted">请先检查登录状态，然后点击"获取文件夹"</p>';
         }
     }
 
@@ -1143,11 +1230,6 @@ class CrawlerApp {
                     timestamp: Date.now()
                 };
                 localStorage.setItem('pan115_login_status', JSON.stringify(statusData));
-                
-                // 如果登录成功，自动加载文件夹列表
-                if (result.logged_in) {
-                    this.loadPan115Folders();
-                }
             } else {
                 throw new Error(result.error || '检查失败');
             }
@@ -1173,6 +1255,22 @@ class CrawlerApp {
     async loadPan115Folders(forceRefresh = false) {
         try {
             const foldersDiv = document.getElementById('pan115-folders-list');
+            
+            // 检查缓存（如果不是强制刷新）
+            if (!forceRefresh) {
+                const cachedFolders = localStorage.getItem('pan115_folders_cache');
+                if (cachedFolders) {
+                    const cacheData = JSON.parse(cachedFolders);
+                    const currentTime = Date.now();
+                    
+                    // 如果缓存时间在10分钟内，使用缓存数据
+                    if (currentTime - cacheData.timestamp < 10 * 60 * 1000) {
+                        this.displayFoldersList(cacheData.folders, false);
+                        return;
+                    }
+                }
+            }
+            
             foldersDiv.innerHTML = '<div class="spinner-border spinner-border-sm" role="status"></div> 加载中...';
             
             // 构建URL，如果需要强制刷新则添加参数
@@ -1182,32 +1280,15 @@ class CrawlerApp {
             
             if (result.success) {
                 const folders = result.folders || [];
-                if (folders.length > 0) {
-                    let html = '<div class="list-group list-group-flush">';
-                    folders.forEach(folder => {
-                        html += `
-                            <div class="list-group-item list-group-item-action" 
-                                 style="cursor: pointer; font-size: 0.875rem; padding: 0.5rem;" 
-                                 onclick="selectPan115Folder('${folder.id}', '${folder.name.replace(/'/g, "\\'")}')"
-                                 title="点击选择此文件夹">
-                                <i class="bi bi-folder"></i> ${folder.name}
-                                <small class="text-muted d-block">ID: ${folder.id}</small>
-                            </div>
-                        `;
-                    });
-                    html += '</div>';
-                    
-                    // 添加缓存状态提示
-                    if (!forceRefresh) {
-                        html += '<div class="mt-2"><small class="text-muted"><i class="bi bi-clock"></i> 数据已缓存，5分钟内有效</small></div>';
-                    } else {
-                        html += '<div class="mt-2"><small class="text-success"><i class="bi bi-arrow-clockwise"></i> 已刷新最新数据</small></div>';
-                    }
-                    
-                    foldersDiv.innerHTML = html;
-                } else {
-                    foldersDiv.innerHTML = '<p class="text-muted mb-0">未找到文件夹</p>';
-                }
+                
+                // 缓存文件夹列表
+                const cacheData = {
+                    folders: folders,
+                    timestamp: Date.now()
+                };
+                localStorage.setItem('pan115_folders_cache', JSON.stringify(cacheData));
+                
+                this.displayFoldersList(folders, forceRefresh);
             } else {
                 throw new Error(result.error || '获取文件夹列表失败');
             }
@@ -1219,6 +1300,143 @@ class CrawlerApp {
                 </div>
             `;
         }
+    }
+    
+    displayFoldersList(folders, isRefreshed = false) {
+        const foldersDiv = document.getElementById('pan115-folders-list');
+        
+        if (folders.length > 0) {
+            let html = '<div class="list-group list-group-flush">';
+            folders.forEach(folder => {
+                html += `
+                    <div class="list-group-item list-group-item-action" 
+                         style="cursor: pointer; font-size: 0.875rem; padding: 0.5rem;" 
+                         onclick="selectPan115Folder('${folder.id}', '${folder.name.replace(/'/g, "\\'")}')"
+                         title="点击选择此文件夹">
+                        <i class="bi bi-folder"></i> ${folder.name}
+                        <small class="text-muted d-block">ID: ${folder.id}</small>
+                    </div>
+                `;
+            });
+            html += '</div>';
+            
+            // 添加缓存状态提示
+            if (isRefreshed) {
+                html += '<div class="mt-2"><small class="text-success"><i class="bi bi-arrow-clockwise"></i> 已刷新最新数据</small></div>';
+            } else {
+                html += '<div class="mt-2"><small class="text-muted"><i class="bi bi-clock"></i> 缓存数据，10分钟内有效</small></div>';
+            }
+            
+            foldersDiv.innerHTML = html;
+        } else {
+            foldersDiv.innerHTML = '<p class="text-muted mb-0">未找到文件夹</p>';
+        }
+    }
+
+    async showPan115QR() {
+        try {
+            this.showAlert('正在获取二维码...', 'info');
+            
+            const response = await fetch('/api/pan115/qr-login', {
+                method: 'POST'
+            });
+            
+            const result = await response.json();
+            if (result.success) {
+                // 创建二维码显示模态框
+                const modalHtml = `
+                    <div class="modal fade" id="qrModal" tabindex="-1">
+                        <div class="modal-dialog modal-dialog-centered">
+                            <div class="modal-content">
+                                <div class="modal-header">
+                                    <h5 class="modal-title">115网盘扫码登录</h5>
+                                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                                </div>
+                                <div class="modal-body text-center">
+                                    <img src="data:image/png;base64,${result.qr_code}" alt="二维码" class="img-fluid mb-3">
+                                    <p class="text-muted">请使用115手机客户端扫描二维码登录</p>
+                                    <div id="qr-status" class="mt-3">
+                                        <div class="spinner-border spinner-border-sm" role="status"></div>
+                                        等待扫码...
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                
+                // 移除已存在的模态框
+                const existingModal = document.getElementById('qrModal');
+                if (existingModal) {
+                    existingModal.remove();
+                }
+                
+                // 添加新的模态框
+                document.body.insertAdjacentHTML('beforeend', modalHtml);
+                
+                // 显示模态框
+                const modal = new bootstrap.Modal(document.getElementById('qrModal'));
+                modal.show();
+                
+                // 开始轮询登录状态
+                this.pollQRLoginStatus(result.session_id, modal);
+            } else {
+                throw new Error(result.error || '获取二维码失败');
+            }
+        } catch (error) {
+            console.error('显示115网盘二维码失败:', error);
+            this.showAlert('显示二维码失败: ' + error.message, 'danger');
+        }
+    }
+
+    async pollQRLoginStatus(sessionId, modal) {
+        const statusDiv = document.getElementById('qr-status');
+        let pollCount = 0;
+        const maxPolls = 60; // 最多轮询60次（5分钟）
+        
+        const poll = async () => {
+            try {
+                const response = await fetch(`/api/pan115/qr-status/${sessionId}`);
+                const result = await response.json();
+                
+                if (result.success) {
+                    if (result.status === 'success') {
+                        statusDiv.innerHTML = '<div class="text-success"><i class="bi bi-check-circle"></i> 登录成功！</div>';
+                        setTimeout(() => {
+                            modal.hide();
+                            this.showAlert('115网盘登录成功！', 'success');
+                            // 重新检查登录状态
+                            this.checkPan115Login();
+                        }, 2000);
+                        return;
+                    } else if (result.status === 'waiting') {
+                        statusDiv.innerHTML = '<div class="spinner-border spinner-border-sm" role="status"></div> 等待扫码...';
+                    } else if (result.status === 'scanned') {
+                        statusDiv.innerHTML = '<div class="text-info"><i class="bi bi-phone"></i> 已扫码，请在手机上确认</div>';
+                    } else if (result.status === 'expired') {
+                        statusDiv.innerHTML = '<div class="text-danger"><i class="bi bi-x-circle"></i> 二维码已过期</div>';
+                        return;
+                    }
+                }
+                
+                pollCount++;
+                if (pollCount < maxPolls) {
+                    setTimeout(poll, 5000); // 5秒后再次轮询
+                } else {
+                    statusDiv.innerHTML = '<div class="text-warning"><i class="bi bi-clock"></i> 登录超时</div>';
+                }
+            } catch (error) {
+                console.error('轮询二维码状态失败:', error);
+                statusDiv.innerHTML = '<div class="text-danger"><i class="bi bi-x-circle"></i> 检查状态失败</div>';
+            }
+        };
+        
+        // 开始轮询
+        setTimeout(poll, 2000);
+    }
+
+    async getPan115Folders() {
+        await this.loadPan115Folders(true); // 强制刷新文件夹列表
     }
 }
 
@@ -1298,24 +1516,37 @@ async function loadCsvFileList() {
         const result = await response.json();
         
         if (result.success) {
-            const select = document.getElementById('csv-file-select');
-            select.innerHTML = '<option value="">请选择CSV文件...</option>';
-            
-            result.files.forEach(file => {
-                const option = document.createElement('option');
-                option.value = file.filename;
-                option.textContent = file.filename;
-                option.dataset.size = file.size;
-                option.dataset.modified = file.modified;
-                select.appendChild(option);
-            });
-        } else {
-            throw new Error(result.error || '获取CSV文件列表失败');
+            // 填充单选列表（结果管理页面）
+            const singleSelect = document.getElementById('csv-file-select');
+            if (singleSelect) {
+                singleSelect.innerHTML = '<option value="" disabled selected>请选择CSV文件...</option>';
+                
+                result.files.forEach(file => {
+                    const option = document.createElement('option');
+                    option.value = file.filename;
+                    option.textContent = file.filename;
+                    option.dataset.size = file.size;
+                    option.dataset.modified = file.modified;
+                    singleSelect.appendChild(option);
+                 });
+                 
+                 // 添加选择变化事件监听器
+                 singleSelect.addEventListener('change', handleCsvFileSelect);
+             }
+         } else {
+             throw new Error(result.error || '获取CSV文件列表失败');
         }
     } catch (error) {
         console.error('加载CSV文件列表失败:', error);
-        app.showAlert('加载CSV文件列表失败: ' + error.message, 'danger');
+        if (app && app.showAlert) {
+            app.showAlert('加载CSV文件列表失败: ' + error.message, 'danger');
+        }
     }
+}
+
+// 为了兼容HTML中的调用，添加别名函数
+async function loadCsvFiles() {
+    await loadCsvFileList();
 }
 
 // CSV文件选择处理
@@ -1325,6 +1556,9 @@ function handleCsvFileSelect() {
     const cacheTransferBtn = document.getElementById('cache-transfer-btn');
     const fileInfo = document.getElementById('csv-file-info');
     const fileDetails = document.getElementById('csv-file-details');
+    
+    // 检查必要元素是否存在
+    if (!select) return;
     
     const selectedFile = select.value;
     
@@ -1338,18 +1572,22 @@ function handleCsvFileSelect() {
         const fileSizeKB = fileSize ? (parseInt(fileSize) / 1024).toFixed(2) : '未知';
         const modifiedDate = fileModified ? new Date(fileModified).toLocaleString('zh-CN') : '未知';
         
-        fileDetails.innerHTML = `
-            <div><strong>文件名:</strong> ${selectedFile}</div>
-            <div><strong>文件大小:</strong> ${fileSizeKB} KB</div>
-            <div><strong>修改时间:</strong> ${modifiedDate}</div>
-        `;
-        fileInfo.style.display = 'block';
-        transferBtn.disabled = false;
-        cacheTransferBtn.disabled = false;
+        if (fileDetails) {
+            fileDetails.innerHTML = `
+                <div><strong>文件名:</strong> ${selectedFile}</div>
+                <div><strong>文件大小:</strong> ${fileSizeKB} KB</div>
+                <div><strong>修改时间:</strong> ${modifiedDate}</div>
+            `;
+        }
+        if (fileInfo) {
+            fileInfo.style.display = 'block';
+        }
+        if (transferBtn) transferBtn.disabled = false;
+        if (cacheTransferBtn) cacheTransferBtn.disabled = false;
     } else {
-        transferBtn.disabled = true;
-        cacheTransferBtn.disabled = true;
-        fileInfo.style.display = 'none';
+        if (transferBtn) transferBtn.disabled = true;
+        if (cacheTransferBtn) cacheTransferBtn.disabled = true;
+        if (fileInfo) fileInfo.style.display = 'none';
     }
 }
 
@@ -1384,7 +1622,8 @@ async function startManualTransfer() {
             app.showAlert(`转存任务已启动！处理了 ${result.total_count || 0} 条记录，成功转存 ${result.success_count || 0} 个文件`, 'success');
             // 清空选择
             select.value = '';
-            document.getElementById('csv-file-info').style.display = 'none';
+            const fileInfo = document.getElementById('csv-file-info');
+            if (fileInfo) fileInfo.style.display = 'none';
         } else {
             throw new Error(result.error || '转存失败');
         }
@@ -1450,7 +1689,8 @@ async function startCacheTransfer() {
             
             // 清空选择
             select.value = '';
-            document.getElementById('csv-file-info').style.display = 'none';
+            const fileInfo = document.getElementById('csv-file-info');
+            if (fileInfo) fileInfo.style.display = 'none';
         } else {
             throw new Error(result.error || '缓存转存失败');
         }
@@ -1470,7 +1710,7 @@ function showCacheManagement(cacheFile) {
     const cacheFilePath = document.getElementById('cache-file-path');
     const processCacheBtn = document.getElementById('process-cache-btn');
     
-    if (cacheFile) {
+    if (cacheFile && cacheFilePath && processCacheBtn && cacheManagement) {
         cacheFilePath.value = cacheFile;
         processCacheBtn.disabled = false;
         cacheManagement.style.display = 'block';
@@ -1485,6 +1725,10 @@ async function refreshCacheInfo() {
     const cacheFilePath = document.getElementById('cache-file-path');
     const cacheInfo = document.getElementById('cache-info');
     const cacheDetails = document.getElementById('cache-details');
+    
+    if (!cacheFilePath || !cacheInfo || !cacheDetails) {
+        return;
+    }
     
     const cacheFile = cacheFilePath.value;
     if (!cacheFile) {
@@ -1507,6 +1751,10 @@ async function processCacheFile() {
     const cacheFilePath = document.getElementById('cache-file-path');
     const batchSizeInput = document.getElementById('batch-size-input');
     const processCacheBtn = document.getElementById('process-cache-btn');
+    
+    if (!cacheFilePath || !batchSizeInput || !processCacheBtn) {
+        return;
+    }
     
     const cacheFile = cacheFilePath.value;
     if (!cacheFile) {

@@ -15,6 +15,7 @@ from apscheduler.triggers.cron import CronTrigger
 from config_manager import ConfigManager
 from crawler import WebCrawler
 from pan115_manager import Pan115Manager
+
 from utils import setup_logging, get_system_info
 
 # 设置日志
@@ -291,13 +292,17 @@ class CrawlTask:
                     else:
                         logger.warning("爬取结果中未包含max_tid信息")
                     
-                    # 检查是否启用自动115网盘转存
+                    # 检查是否启用自动115网盘转存或磁力链接批量提交
                     csv_file = result.get('csv_file') or result.get('result_file')
-                    logger.info(f"检查自动转存: csv_file={csv_file}, exists={os.path.exists(csv_file) if csv_file else False}")
+                    logger.info(f"检查自动处理: csv_file={csv_file}, exists={os.path.exists(csv_file) if csv_file else False}")
                     if csv_file and os.path.exists(csv_file):
-                        # 检查115网盘配置中的auto_transfer_enabled设置
+                        # 检查115网盘配置
                         pan115_config = pan115_manager.load_config()
-                        if pan115_config.get('auto_transfer_enabled', False):
+                        auto_transfer_enabled = pan115_config.get('auto_transfer_enabled', False)
+                        auto_magnet_submit_enabled = pan115_config.get('auto_magnet_submit_enabled', False)
+                        
+                        # 自动转存到115网盘（原有功能）
+                        if auto_transfer_enabled:
                             try:
                                 self.status = '正在转存到115网盘...'
                                 socketio.emit('task_progress', {
@@ -329,18 +334,78 @@ class CrawlTask:
                                     'success': False,
                                     'message': f'转存异常: {str(e)}'
                                 }
-                        else:
-                            logger.info("115网盘自动转存未启用，跳过转存步骤")
-                            self.result['pan115_transfer'] = {
+                        
+                        # 自动磁力链接批量提交（新功能）
+                        elif auto_magnet_submit_enabled:
+                            try:
+                                self.status = '正在提取磁力链接到缓存...'
+                                socketio.emit('task_progress', {
+                                    'task_id': self.task_id,
+                                    'progress': self.progress,
+                                    'status': self.status
+                                })
+                                
+                                # 第一步：提取磁力链接到缓存文件
+                                cache_result = pan115_manager.extract_magnets_to_cache(csv_file)
+                                
+                                if cache_result['cached_count'] > 0:
+                                    self.status = '正在批量提交磁力链接...'
+                                    socketio.emit('task_progress', {
+                                        'task_id': self.task_id,
+                                        'progress': self.progress,
+                                        'status': self.status
+                                    })
+                                    
+                                    # 第二步：从缓存分批处理磁力链接
+                                    batch_size = pan115_config.get('batch_size', 100)
+                                    process_result = pan115_manager.process_cache_file(
+                                        cache_result['cache_file'], 
+                                        batch_size=batch_size,
+                                        progress_callback=lambda p, s: socketio.emit('task_progress', {
+                                            'task_id': self.task_id,
+                                            'progress': min(self.progress + p // 10, 99),
+                                            'status': f'磁力链接提交: {s}'
+                                        })
+                                    )
+                                    
+                                    # 合并结果
+                                    magnet_submit_result = {
+                                        'success': True,
+                                        'cache_result': cache_result,
+                                        'process_result': process_result,
+                                        'message': f"磁力链接批量提交完成: 缓存{cache_result['cached_count']}个, 成功{process_result.get('success_count', 0)}个, 失败{process_result.get('failed_count', 0)}个"
+                                    }
+                                    
+                                    logger.info(magnet_submit_result['message'])
+                                    self.result['magnet_submit'] = magnet_submit_result
+                                else:
+                                    logger.info("没有找到需要提交的磁力链接")
+                                    self.result['magnet_submit'] = {
+                                        'success': True,
+                                        'message': '没有找到需要提交的磁力链接',
+                                        'cache_result': cache_result
+                                    }
+                                    
+                            except Exception as e:
+                                logger.error(f"磁力链接批量提交异常: {str(e)}")
+                                self.result['magnet_submit'] = {
+                                    'success': False,
+                                    'message': f'磁力链接提交异常: {str(e)}'
+                                }
+                        
+                        # 如果两个功能都未启用
+                        if not auto_transfer_enabled and not auto_magnet_submit_enabled:
+                            logger.info("115网盘自动转存和磁力链接自动提交均未启用，跳过自动处理")
+                            self.result['auto_process'] = {
                                 'success': False,
-                                'message': '115网盘自动转存未启用'
+                                'message': '115网盘自动转存和磁力链接自动提交均未启用'
                             }
                     else:
                         if not csv_file:
-                            logger.info("爬取结果中未包含CSV文件路径，跳过115网盘转存")
+                            logger.info("爬取结果中未包含CSV文件路径，跳过自动处理")
                         else:
-                            logger.warning(f"CSV文件不存在: {csv_file}，跳过115网盘转存")
-                        self.result['pan115_transfer'] = {
+                            logger.warning(f"CSV文件不存在: {csv_file}，跳过自动处理")
+                        self.result['auto_process'] = {
                             'success': False,
                             'message': 'CSV文件不存在或路径为空'
                         }
@@ -680,7 +745,7 @@ def manual_csv_transfer():
         logger.info(f"保存临时CSV文件: {temp_filepath}")
         
         # 执行转存（手动转存强制执行）
-        result = pan115_manager.process_csv_file(temp_filepath, force_transfer=True)
+        result = pan115_manager.manual_transfer_csv(temp_filepath)
         
         # 清理临时文件
         try:
@@ -797,34 +862,103 @@ def transfer_with_cache():
     try:
         data = request.json
         csv_filename = data.get('csv_filename')
+        csv_filenames = data.get('csv_filenames')
         batch_size = data.get('batch_size', 100)
         
-        if not csv_filename:
+        # 支持单个文件或多个文件
+        if csv_filenames:
+            filenames = csv_filenames
+        elif csv_filename:
+            filenames = [csv_filename]
+        else:
             return jsonify({'success': False, 'error': '未指定CSV文件名'}), 400
         
-        # 验证文件类型
-        if not csv_filename.lower().endswith('.csv'):
-            return jsonify({'success': False, 'error': '请选择CSV文件'}), 400
+        if not filenames:
+            return jsonify({'success': False, 'error': '未指定CSV文件名'}), 400
         
-        # 构建文件路径
         data_dir = config_manager.get_data_dir()
-        csv_filepath = os.path.join(data_dir, csv_filename)
+        all_magnets = set()
+        processed_files = []
         
-        if not os.path.exists(csv_filepath):
-            return jsonify({'success': False, 'error': 'CSV文件不存在'}), 400
+        # 处理每个CSV文件
+        for filename in filenames:
+            # 验证文件类型
+            if not filename.lower().endswith('.csv'):
+                continue
+            
+            # 构建文件路径
+            csv_filepath = os.path.join(data_dir, filename)
+            
+            if not os.path.exists(csv_filepath):
+                continue
+            
+            try:
+                # 读取CSV文件并提取磁力链接
+                import pandas as pd
+                try:
+                    df = pd.read_csv(csv_filepath, encoding='utf-8')
+                except UnicodeDecodeError:
+                    try:
+                        df = pd.read_csv(csv_filepath, encoding='gbk')
+                    except UnicodeDecodeError:
+                        df = pd.read_csv(csv_filepath, encoding='latin-1')
+                
+                # 查找包含磁力链接的列
+                magnet_columns = []
+                for col in df.columns:
+                    if df[col].astype(str).str.contains('magnet:', na=False).any():
+                        magnet_columns.append(col)
+                
+                if not magnet_columns:
+                    continue
+                
+                # 提取磁力链接
+                file_magnets = set()
+                for col in magnet_columns:
+                    magnets = df[col].dropna().astype(str)
+                    for magnet in magnets:
+                        if magnet.startswith('magnet:'):
+                            # 清理磁力链接
+                            cleaned_magnet = magnet.strip()
+                            if len(cleaned_magnet) > 20:
+                                file_magnets.add(cleaned_magnet)
+                
+                all_magnets.update(file_magnets)
+                processed_files.append({
+                    'filename': filename,
+                    'magnet_count': len(file_magnets)
+                })
+                
+            except Exception as e:
+                logger.error(f"处理文件 {filename} 失败: {str(e)}")
+                continue
+        
+        if not all_magnets:
+            return jsonify({'success': False, 'error': '未找到有效的磁力链接'}), 400
         
         # 验证批次大小
         if not isinstance(batch_size, int) or batch_size < 1 or batch_size > 100:
-            batch_size = 100
+            batch_size = 50
         
-        # 使用缓存机制处理CSV文件
-        result = pan115_manager.process_csv_with_cache(csv_filepath, batch_size, force_transfer=True)
+        # 创建缓存文件
+        import time
+        cache_filename = f"cache_transfer_{int(time.time())}.txt"
+        cache_filepath = os.path.join(data_dir, cache_filename)
+        
+        with open(cache_filepath, 'w', encoding='utf-8') as f:
+            for magnet in sorted(all_magnets):
+                f.write(magnet + '\n')
+        
+        # 使用缓存机制进行转存
+        result = pan115_manager.process_cache_file(cache_filepath, batch_size)
         
         return jsonify({
             'success': True,
-            'cache_result': result.get('cache_result', {}),
-            'process_result': result.get('process_result', {}),
-            'message': result['message']
+            'processed_files': processed_files,
+            'total_magnets': len(all_magnets),
+            'cache_filename': cache_filename,
+            'transfer_result': result,
+            'message': f'成功处理 {len(processed_files)} 个文件，提取 {len(all_magnets)} 个唯一磁力链接'
         })
         
     except Exception as e:
@@ -1020,6 +1154,279 @@ def get_scheduler_status():
         
     except Exception as e:
         logger.error(f"获取调度器状态失败: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# ===== 新版115网盘管理器API =====
+
+@app.route('/pan115_new')
+def pan115_new_page():
+    """新版115网盘管理页面"""
+    return render_template('pan115_new.html')
+
+@app.route('/api/pan115/check_login', methods=['POST'])
+def pan115_check_login():
+    """检查115登录状态"""
+    try:
+        is_logged_in = pan115_manager.check_login()
+        return jsonify({
+            'success': True,
+            'data': {'is_logged_in': is_logged_in}
+        })
+    except Exception as e:
+        logger.error(f"检查115登录状态失败: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/pan115/qr_login', methods=['POST'])
+def pan115_qr_login():
+    """扫码登录115"""
+    try:
+        import tempfile
+        import os
+        
+        # 创建临时文件用于存储cookie
+        temp_cookie_file = os.path.join(tempfile.gettempdir(), f"115_cookie_{int(time.time())}.txt")
+        
+        result = pan115_manager.qr_login(
+            output_file=temp_cookie_file,
+            show_qr=False  # 在Web环境中不显示二维码
+        )
+        
+        # 清理临时文件
+        try:
+            if os.path.exists(temp_cookie_file):
+                os.remove(temp_cookie_file)
+        except:
+            pass
+        
+        return jsonify({
+            'success': result['success'],
+            'message': result['message']
+        })
+        
+    except Exception as e:
+        logger.error(f"扫码登录失败: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/pan115/set_cookie', methods=['POST'])
+def pan115_set_cookie():
+    """手动设置Cookie"""
+    try:
+        data = request.json
+        cookie_content = data.get('cookie_content', '').strip()
+        
+        if not cookie_content:
+            return jsonify({'success': False, 'error': 'Cookie内容不能为空'}), 400
+        
+        result = pan115_manager.set_cookie_manual(cookie_content)
+        
+        return jsonify({
+            'success': result['success'],
+            'message': result['message']
+        })
+        
+    except Exception as e:
+        logger.error(f"设置Cookie失败: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/pan115/get_folders', methods=['POST'])
+def pan115_get_folders():
+    """获取文件夹列表"""
+    try:
+        data = request.json or {}
+        parent_id = data.get('parent_id', 0)
+        
+        folders = pan115_manager.get_folders(parent_id)
+        
+        return jsonify({
+            'success': True,
+            'data': {'folders': folders}
+        })
+        
+    except Exception as e:
+        logger.error(f"获取文件夹列表失败: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/pan115/submit_magnets', methods=['POST'])
+def pan115_submit_magnets():
+    """批量提交磁力链接"""
+    try:
+        data = request.json
+        magnet_links = data.get('magnet_links', [])
+        target_dir_id = data.get('target_dir_id')
+        
+        if not magnet_links:
+            return jsonify({'success': False, 'error': '没有磁力链接需要处理'}), 400
+        
+        # 进度回调函数
+        def progress_callback(progress, status):
+            # 通过SocketIO发送进度更新
+            socketio.emit('pan115_progress', {
+                'progress': progress,
+                'status': status
+            })
+        
+        result = pan115_manager.submit_batch_magnets(
+            magnet_links,
+            progress_callback=progress_callback,
+            target_dir_id=target_dir_id
+        )
+        
+        return jsonify({
+            'success': result['success'],
+            'data': result
+        })
+        
+    except Exception as e:
+        logger.error(f"批量提交磁力链接失败: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/pan115/get_offline_tasks', methods=['POST'])
+def pan115_get_offline_tasks():
+    """获取离线任务列表"""
+    try:
+        data = request.json or {}
+        page = data.get('page', 0)
+        
+        tasks = pan115_manager.get_offline_tasks(page)
+        
+        return jsonify({
+            'success': True,
+            'data': {'tasks': tasks}
+        })
+        
+    except Exception as e:
+        logger.error(f"获取离线任务列表失败: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/pan115/remove_offline_task', methods=['POST'])
+def pan115_remove_offline_task():
+    """删除离线任务"""
+    try:
+        data = request.json
+        info_hash = data.get('info_hash')
+        remove_files = data.get('remove_files', False)
+        
+        if not info_hash:
+            return jsonify({'success': False, 'error': '缺少info_hash参数'}), 400
+        
+        success = pan115_manager.remove_offline_task(info_hash, remove_files)
+        
+        return jsonify({
+            'success': success,
+            'message': '删除成功' if success else '删除失败'
+        })
+        
+    except Exception as e:
+        logger.error(f"删除离线任务失败: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/pan115/move_files', methods=['POST'])
+def pan115_move_files():
+    """移动文件"""
+    try:
+        data = request.json
+        source_dir_id = data.get('source_dir_id')
+        target_dir_id = data.get('target_dir_id')
+        file_types = data.get('file_types')
+        
+        if not source_dir_id or not target_dir_id:
+            return jsonify({'success': False, 'error': '缺少源目录或目标目录参数'}), 400
+        
+        result = pan115_manager.move_files(
+            source_dir_id,
+            target_dir_id,
+            file_types
+        )
+        
+        return jsonify({
+            'success': result['success'],
+            'data': result
+        })
+        
+    except Exception as e:
+        logger.error(f"移动文件失败: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/pan115/start_auto_move', methods=['POST'])
+def pan115_start_auto_move():
+    """启动定时文件移动"""
+    try:
+        success = pan115_manager.start_auto_move_scheduler()
+        
+        return jsonify({
+            'success': success,
+            'message': '定时任务启动成功' if success else '定时任务启动失败'
+        })
+        
+    except Exception as e:
+        logger.error(f"启动定时文件移动失败: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/pan115/stop_auto_move', methods=['POST'])
+def pan115_stop_auto_move():
+    """停止定时文件移动"""
+    try:
+        success = pan115_manager.stop_auto_move_scheduler()
+        
+        return jsonify({
+            'success': success,
+            'message': '定时任务停止成功' if success else '定时任务停止失败'
+        })
+        
+    except Exception as e:
+        logger.error(f"停止定时文件移动失败: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/pan115/get_system_info', methods=['POST'])
+def pan115_get_system_info():
+    """获取系统信息"""
+    try:
+        storage_info = pan115_manager.get_storage_info()
+        offline_quota = pan115_manager.get_offline_quota_info()
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'storage_info': storage_info,
+                'offline_quota': offline_quota
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"获取系统信息失败: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/pan115/config', methods=['GET'])
+def pan115_get_config():
+    """获取配置"""
+    try:
+        config = pan115_manager.load_config()
+        
+        return jsonify({
+            'success': True,
+            'data': {'config': config}
+        })
+        
+    except Exception as e:
+        logger.error(f"获取配置失败: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/pan115/config', methods=['POST'])
+def pan115_save_config():
+    """保存配置"""
+    try:
+        data = request.json
+        config = data.get('config', {})
+        
+        success = pan115_manager.save_config(config)
+        
+        return jsonify({
+            'success': success,
+            'message': '配置保存成功' if success else '配置保存失败'
+        })
+        
+    except Exception as e:
+        logger.error(f"保存配置失败: {str(e)}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # SocketIO事件处理
