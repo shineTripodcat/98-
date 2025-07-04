@@ -1,0 +1,11 @@
+{
+    "target_dir_id": "122545555555555",
+    "auto_transfer_enabled": true,
+    "skip_duplicates": true,
+    "skip_invalid_magnets": true,
+    "magnet_column": "磁力链接",
+    "deduplication_scope": "all",
+    "request_interval": 5,
+    "batch_size": 50,
+    "use_cache_mode": false
+}

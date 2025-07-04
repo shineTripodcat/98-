@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  crawler-micro:
+    image: shine1223/98t:latest
+    container_name: web-crawler-micro
+    ports:
+      - "8105:8105"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config:/app/config
+    environment:
+      - FLASK_ENV=production
+      - MICRO_ENV=true
+      - ALPINE_ENV=true
+      - CHROMEDRIVER_PATH=/usr/bin/chromedriver
+      - TZ=Asia/Shanghai
+    restart: unless-stopped
+    # 简化的健康检查
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8105/"]
+      interval: 60s
+      timeout: 5s
+      retries: 2
+      start_period: 10s
+    # 安全配置
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=50m
+      - /app/logs:noexec,nosuid,size=100m

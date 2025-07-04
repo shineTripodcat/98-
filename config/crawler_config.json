@@ -1,0 +1,37 @@
+{
+  "basic": {
+    "base_url": "https://s9ko.avp76.net",
+    "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "worker_count": 5,
+    "min_wait_time": 2,
+    "random_delay": 5,
+    "proxy": "http://127.0.0.1:7890",
+    "headless": true,
+    "debug": false
+  },
+  "forums": [
+    {
+      "name": "测试论坛",
+      "fid": 36,
+      "typeid": 672,
+      "start_page": 1,
+      "end_page": 3,
+      "tid_file": "tid36.txt",
+      "enabled": true
+    }
+  ],
+  "schedule": {
+    "enabled": true,
+    "mode": "crawl_tids",
+    "cron": "0 */6 * * *"
+  },
+  "max_tid": "0",
+  "headless": true,
+  "debug": false,
+  "random_delay": 5,
+  "min_wait_time": 2,
+  "worker_count": 5,
+  "max_pages_per_run": 5,
+  "base_url": "https://s9ko.avp76.net",
+  "mode": "update_magnets"
+}
