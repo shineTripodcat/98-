@@ -1,5 +1,5 @@
 # 基于更轻量的 debian slim 镜像，自动安装 Chromium/Chromedriver，极致精简
-FROM python:3.11-slim
+FROM python:3.13-slim
 
 # 安装系统依赖和 Chromium/Chromedriver 及编译工具，安装完依赖后卸载编译工具
 RUN apt-get update \
