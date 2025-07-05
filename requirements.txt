@@ -1,16 +1,23 @@
-# 超轻量级版本 - 包含核心依赖和可选功能
+# 核心Web框架依赖
 Flask==2.3.3
 flask-socketio==5.3.6
+
+# 爬虫和自动化依赖
 selenium==4.15.2
 requests==2.31.0
-pandas==2.2.3
-APScheduler==3.10.4
 beautifulsoup4==4.13.0
-psutil==5.9.5
+
+# 数据处理依赖
+pandas==2.2.3
+
+# 任务调度依赖
+APScheduler==3.10.4
 schedule
 
-# python-115 及其核心依赖
-python-115
+# 系统监控依赖
+psutil==5.9.5
+
+# python-115 核心依赖（本地安装python-115库）
 httpx
 httpx_request>=0.0.8.2
 orjson
