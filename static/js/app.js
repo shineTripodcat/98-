@@ -1810,3 +1810,43 @@ async function processCacheFile() {
         processCacheBtn.innerHTML = '<i class="bi bi-play"></i> 处理缓存';
     }
 }
+
+// 自动移动相关函数
+class AutoMoveManager {
+    
+    // 手动移动
+    async manualMove() {
+        try {
+            // 显示确认对话框
+            if (!confirm('确定要立即执行文件移动吗？这将把源文件夹下的所有文件和子文件夹移动到目标文件夹。')) {
+                return;
+            }
+            
+            const response = await fetch('/api/pan115/manual_move', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            const result = await response.json();
+            
+            if (result.success) {
+                app.showAlert('手动移动任务执行成功: ' + result.message, 'success');
+            } else {
+                throw new Error(result.error || result.message || '手动移动失败');
+            }
+        } catch (error) {
+            console.error('手动移动失败:', error);
+            app.showAlert('手动移动失败: ' + error.message, 'danger');
+        }
+    }
+}
+
+// 创建自动移动管理器实例
+const autoMoveManager = new AutoMoveManager();
+
+// 将手动移动函数添加到CrawlerApp类中
+CrawlerApp.prototype.manualMove = function() {
+    return autoMoveManager.manualMove();
+};

@@ -65,6 +65,7 @@ class Pan115Manager:
             "auto_move_source_dir_id": "",
             "auto_move_target_dir_id": "",
             "auto_move_interval_hours": 24,
+            "auto_move_cron": "0 2 * * *",
             "qr_login_enabled": True,
             "cookie_auto_refresh": True
         }
@@ -627,17 +628,50 @@ class Pan115Manager:
             client = self.get_client()
             fs = client.fs
             
-            # 获取源目录下的所有文件
-            source_items = list(fs.listdir(source_dir_id))
+            logger.info(f"开始获取源目录 {source_dir_id} 下的文件列表")
+            # 使用底层的 fs_files 方法获取文件列表
+            logger.info("调用 fs.fs_files() 方法")
+            try:
+                files_result = fs.fs_files({"cid": source_dir_id})
+                logger.info(f"fs_files 返回结果类型: {type(files_result)}")
+                
+                # 从返回结果中提取文件列表
+                if isinstance(files_result, dict) and 'data' in files_result:
+                    source_items = files_result['data']
+                    logger.info(f"获取到 {len(source_items)} 个文件/文件夹")
+                else:
+                    logger.error(f"fs_files 返回了意外的格式: {files_result}")
+                    source_items = []
+            except Exception as fs_files_error:
+                logger.error(f"fs.fs_files() 调用失败: {type(fs_files_error).__name__}: {str(fs_files_error)}")
+                import traceback
+                logger.error(f"详细错误堆栈: {traceback.format_exc()}")
+                raise
+            
+            # 检查 source_items 中每个项目的类型
+            for i, item in enumerate(source_items[:3]):  # 只检查前3个
+                logger.info(f"Item {i}: type={type(item)}, keys={list(item.keys()) if isinstance(item, dict) else 'not dict'}")
+                if isinstance(item, dict):
+                    # fs_files 返回的字段可能是 n (name), fid (file_id), ico (icon/type) 等
+                    name_field = item.get('n', item.get('name', ''))
+                    id_field = item.get('fid', item.get('id', ''))
+                    is_dir = item.get('ico', '') == 'folder' or item.get('is_directory', False)
+                    logger.info(f"Item {i} name: {name_field}, id: {id_field}, is_dir: {is_dir}")
             
             if file_types:
                 # 过滤指定类型的文件
                 filtered_items = []
                 for item in source_items:
-                    if not item.is_dir():
-                        file_ext = item.name.split('.')[-1].lower() if '.' in item.name else ''
-                        if file_ext in file_types:
-                            filtered_items.append(item)
+                    # 检查是否为文件（不是目录）
+                    if isinstance(item, dict):
+                        # 检查是否为目录
+                        is_dir = item.get('ico', '') == 'folder' or item.get('is_directory', False)
+                        if not is_dir:
+                            # 安全获取文件名
+                            item_name = item.get('n', item.get('name', ''))
+                            file_ext = item_name.split('.')[-1].lower() if '.' in item_name else ''
+                            if file_ext in file_types:
+                                filtered_items.append(item)
                 source_items = filtered_items
             
             if not source_items:
@@ -652,17 +686,60 @@ class Pan115Manager:
             moved_count = 0
             failed_count = 0
             
+            # 收集所有文件ID和文件名用于批量移动
+            file_ids = []
+            file_names = []
+            
             for item in source_items:
-                try:
-                    # 使用 python-115 库的移动功能
-                    result = fs.move(item.id, target_dir_id)
-                    if result:
-                        moved_count += 1
+                if isinstance(item, dict):
+                    item_name = item.get('n', item.get('name', ''))
+                    item_id = item.get('fid', item.get('id', ''))
+                    if item_id:  # 只有有效ID的文件才加入批量移动
+                        file_ids.append(int(item_id))
+                        file_names.append(item_name)
+                        logger.debug(f"准备移动文件: {item_name}, ID: {item_id}")
+            
+            if not file_ids:
+                logger.warning("没有找到有效的文件ID，跳过移动操作")
+                return {
+                    'success': True,
+                    'total': 0,
+                    'moved_count': 0,
+                    'failed_count': 0,
+                    'message': '没有找到有效的文件进行移动'
+                }
+            
+            logger.info(f"开始批量移动 {len(file_ids)} 个文件")
+            
+            try:
+                # 使用批量移动API
+                result = fs.fs_move(file_ids, target_dir_id)
+                logger.info(f"批量移动返回结果: {result}")
+                
+                # 检查批量移动结果
+                if isinstance(result, dict):
+                    if result.get('state', False):
+                        moved_count = len(file_ids)
+                        logger.info(f"批量移动成功: {moved_count} 个文件")
+                        for name in file_names:
+                            logger.debug(f"成功移动文件: {name}")
                     else:
-                        failed_count += 1
-                except Exception as e:
-                    logger.error(f"移动文件 {item.name} 失败: {str(e)}")
-                    failed_count += 1
+                        failed_count = len(file_ids)
+                        error_msg = result.get('error', result.get('message', '未知错误'))
+                        logger.error(f"批量移动失败: {error_msg}")
+                        for name in file_names:
+                            logger.error(f"移动文件 {name} 失败: {error_msg}")
+                else:
+                    failed_count = len(file_ids)
+                    logger.error(f"fs_move 返回了意外的类型: {type(result)}")
+                    
+            except Exception as e:
+                failed_count = len(file_ids)
+                logger.error(f"批量移动文件失败: {str(e)}")
+                import traceback
+                logger.error(f"详细错误信息: {traceback.format_exc()}")
+                for name in file_names:
+                    logger.error(f"移动文件 {name} 失败: {str(e)}")
             
             result = {
                 'success': True,
@@ -699,16 +776,47 @@ class Pan115Manager:
             # 清除之前的任务
             schedule.clear()
             
-            # 设置定时任务
-            interval_hours = self.config.get('auto_move_interval_hours', 24)
-            schedule.every(interval_hours).hours.do(self._auto_move_task)
+            # 设置定时任务 - 支持cron表达式
+            cron_expression = self.config.get('auto_move_cron', '0 2 * * *')  # 默认每天凌晨2点
+            
+            # 解析cron表达式 (简化版: 分 时 日 月 周)
+            try:
+                parts = cron_expression.split()
+                if len(parts) == 5:
+                    minute, hour, day, month, weekday = parts
+                    
+                    # 根据cron表达式设置schedule任务
+                    if weekday != '*':
+                        # 按周执行
+                        weekdays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+                        if weekday.isdigit() and 0 <= int(weekday) <= 6:
+                            schedule.every().week.at(f"{hour}:{minute}").do(self._auto_move_task)
+                    elif day != '*':
+                        # 按月执行（简化为每月1号）
+                        if day == '1':
+                            schedule.every().month.do(self._auto_move_task)
+                    elif hour != '*' and minute != '*':
+                        # 每天指定时间执行
+                        schedule.every().day.at(f"{hour}:{minute}").do(self._auto_move_task)
+                    else:
+                        # 默认每24小时执行一次
+                        schedule.every(24).hours.do(self._auto_move_task)
+                else:
+                    # 如果cron格式不正确，使用小时间隔模式
+                    interval_hours = self.config.get('auto_move_interval_hours', 24)
+                    schedule.every(interval_hours).hours.do(self._auto_move_task)
+                    
+            except Exception as cron_error:
+                logger.warning(f"解析cron表达式失败: {cron_error}，使用默认间隔模式")
+                interval_hours = self.config.get('auto_move_interval_hours', 24)
+                schedule.every(interval_hours).hours.do(self._auto_move_task)
             
             # 启动调度器线程
             self._scheduler_running = True
             self._scheduler_thread = threading.Thread(target=self._run_scheduler, daemon=True)
             self._scheduler_thread.start()
             
-            logger.info(f"定时文件移动任务已启动，间隔: {interval_hours} 小时")
+            logger.info(f"定时文件移动任务已启动，cron表达式: {cron_expression}")
             return True
             
         except Exception as e:
@@ -761,6 +869,36 @@ class Pan115Manager:
                 
         except Exception as e:
             logger.error(f"定时移动任务异常: {str(e)}")
+    
+    def manual_move_files(self) -> dict:
+        """手动触发文件移动"""
+        try:
+            source_dir_id = self.config.get('auto_move_source_dir_id')
+            target_dir_id = self.config.get('auto_move_target_dir_id')
+            
+            if not source_dir_id or not target_dir_id:
+                return {
+                    'success': False,
+                    'message': '源文件夹ID或目标文件夹ID未配置'
+                }
+            
+            logger.info("开始执行手动文件移动任务")
+            result = self.move_files(source_dir_id, target_dir_id)
+            
+            if result['success']:
+                logger.info(f"手动移动任务完成: {result['message']}")
+            else:
+                logger.error(f"手动移动任务失败: {result['message']}")
+            
+            return result
+                
+        except Exception as e:
+            error_msg = f"手动移动任务执行异常: {str(e)}"
+            logger.error(error_msg)
+            return {
+                'success': False,
+                'message': error_msg
+            }
     
     def get_storage_info(self) -> Dict:
         """获取存储空间信息"""

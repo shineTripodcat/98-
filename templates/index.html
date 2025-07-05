@@ -624,18 +624,31 @@
                                             <div class="mb-3">
                                                 <label class="form-label">源文件夹ID</label>
                                                 <input type="text" class="form-control" name="auto_move_source_dir_id" placeholder="源文件夹ID">
+                                                <div class="form-text">将从此文件夹移动所有文件和子文件夹</div>
                                             </div>
                                         </div>
                                         <div class="col-md-4">
                                             <div class="mb-3">
                                                 <label class="form-label">目标文件夹ID</label>
                                                 <input type="text" class="form-control" name="auto_move_target_dir_id" placeholder="目标文件夹ID">
+                                                <div class="form-text">文件将移动到此文件夹下</div>
                                             </div>
                                         </div>
                                         <div class="col-md-4">
                                             <div class="mb-3">
-                                                <label class="form-label">移动间隔(小时)</label>
-                                                <input type="number" class="form-control" name="auto_move_interval_hours" min="1" value="24">
+                                                <label class="form-label">Cron定时表达式</label>
+                                                <input type="text" class="form-control" name="auto_move_cron" placeholder="0 2 * * *" value="0 2 * * *">
+                                                <div class="form-text">格式: 分 时 日 月 周 (默认每天凌晨2点)</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="row">
+                                        <div class="col-md-12">
+                                            <div class="d-grid gap-2 d-md-flex">
+                                                <button type="button" class="btn btn-primary" onclick="manualMove()">
+                                                    <i class="bi bi-arrow-right-circle"></i> 立即移动
+                                                </button>
+                                                <div class="form-text mt-2">提示：启用自动移动复选框后，系统将按Cron表达式自动执行移动任务</div>
                                             </div>
                                         </div>
                                     </div>
@@ -1002,6 +1015,11 @@
 
         function loadCsvFiles() {
             app.loadCsvFiles();
+        }
+
+        // 手动移动相关函数
+        function manualMove() {
+            app.manualMove();
         }
 
     </script>

@@ -1377,6 +1377,21 @@ def pan115_stop_auto_move():
         logger.error(f"停止定时文件移动失败: {str(e)}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/api/pan115/manual_move', methods=['POST'])
+def pan115_manual_move():
+    """手动触发文件移动"""
+    try:
+        result = pan115_manager.manual_move_files()
+        
+        return jsonify({
+            'success': result['success'],
+            'message': result['message']
+        })
+        
+    except Exception as e:
+        logger.error(f"手动移动文件失败: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 @app.route('/api/pan115/get_system_info', methods=['POST'])
 def pan115_get_system_info():
     """获取系统信息"""
@@ -1418,7 +1433,31 @@ def pan115_save_config():
         data = request.json
         config = data.get('config', {})
         
+        # 获取旧配置中的自动移动状态
+        old_config = pan115_manager.load_config()
+        old_auto_move_enabled = old_config.get('auto_move_enabled', False)
+        
+        # 保存新配置
         success = pan115_manager.save_config(config)
+        
+        if success:
+            # 检查自动移动配置是否发生变化
+            new_auto_move_enabled = config.get('auto_move_enabled', False)
+            
+            if new_auto_move_enabled != old_auto_move_enabled:
+                if new_auto_move_enabled:
+                    # 启动自动移动任务
+                    pan115_manager.start_auto_move_scheduler()
+                    logger.info("自动移动任务已启动")
+                else:
+                    # 停止自动移动任务
+                    pan115_manager.stop_auto_move_scheduler()
+                    logger.info("自动移动任务已停止")
+            elif new_auto_move_enabled:
+                # 如果自动移动仍然启用，重启任务以应用新的配置
+                pan115_manager.stop_auto_move_scheduler()
+                pan115_manager.start_auto_move_scheduler()
+                logger.info("自动移动任务已重启以应用新配置")
         
         return jsonify({
             'success': success,
