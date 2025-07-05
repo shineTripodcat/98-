@@ -27,7 +27,12 @@ WORKDIR /app
 
 # 复制依赖和代码
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# 先安装基础依赖，然后单独安装python-115
+RUN pip install --no-cache-dir Flask==2.3.3 flask-socketio==5.3.6 selenium==4.15.2 requests==2.31.0 pandas==2.2.3 APScheduler==3.10.4 beautifulsoup4==4.13.0 psutil==5.9.5 schedule \
+    && pip install --no-cache-dir httpx orjson rich yarl \
+    && pip install --no-cache-dir p115client>=0.0.5.12.2 \
+    && pip install --no-cache-dir httpx_request>=0.0.8.2 magnet2torrent glob_pattern>=0.0.2 posixpatht>=0.0.4 \
+    && pip install --no-cache-dir python-115
 COPY app.py .
 COPY crawler.py .
 COPY config_manager.py .
